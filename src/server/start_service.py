@@ -17,7 +17,8 @@ from src.types.peer_info import PeerInfo
 from src.util.logging import initialize_logging
 from src.util.config import load_config_cli, load_config
 from src.util.setproctitle import setproctitle
-
+from random import randrange
+from math import log
 from .reconnect_task import start_reconnect_task
 
 OutboundMessageGenerator = AsyncGenerator[OutboundMessage, None]
@@ -28,7 +29,7 @@ def create_periodic_introducer_poll_task(
     peer_info,
     global_connections,
     introducer_connect_interval,
-    target_peer_count,
+    target_outbound_connections,
 ):
     """
 
@@ -36,8 +37,16 @@ def create_periodic_introducer_poll_task(
     requesting the peer list.
     """
 
+    def poisson_next_send(now, avg_interval_seconds):
+        return now + (
+            math.log(
+                random.randrange(1 << 48) * -0.0000000000000035527136788 + 1
+            ) * avg_interval_seconds * -1000000.0 + 0.5
+        )
+
+
     def _num_needed_peers() -> int:
-        diff = target_peer_count - len(global_connections.get_full_node_connections())
+        diff = target_outgoing_connections - global_connections.count_outbound_connections()
         return diff if diff >= 0 else 0
 
     async def introducer_client():
@@ -45,19 +54,90 @@ def create_periodic_introducer_poll_task(
             msg = Message("request_peers", introducer_protocol.RequestPeers())
             yield OutboundMessage(NodeType.INTRODUCER, msg, Delivery.RESPOND)
 
+        # If we are still connected to introducer, disconnect
+        for connection in global_connections.get_connections():
+            if connection.connection_type == NodeType.INTRODUCER:
+                global_connections.close(connection)
+        # The first time connecting to introducer, keep trying to connect
+        if _num_needed_peers():
+            if not await server.start_client(peer_info, on_connect):
+                await asyncio.sleep(5)
+                continue
+    
+    async def connect_to_peers():
+        next_feeler = poisson_next_send(time.time()*1000*1000, 120)
         while True:
-            # If we are still connected to introducer, disconnect
-            for connection in global_connections.get_connections():
-                if connection.connection_type == NodeType.INTRODUCER:
-                    global_connections.close(connection)
-            # The first time connecting to introducer, keep trying to connect
-            if _num_needed_peers():
-                if not await server.start_client(peer_info, on_connect):
-                    await asyncio.sleep(5)
-                    continue
-            await asyncio.sleep(introducer_connect_interval)
+            # We don't know any address, connect to the introducer to get some.
+            if global_connections.size() == 0:
+                await introducer_client()
+                continue
+            # Only connect out to one peer per network group (/16 for IPv4).
+            groups = []
+            for peer in global_connections.peers.get_peers():
+                group = peer.get_group()
+                if group not in groups:
+                    groups.append(group)
+            count_outbound = global_connections.count_outbound_connections()
 
-    return asyncio.create_task(introducer_client())
+            # Feeler Connections
+            #
+            # Design goals:
+            # * Increase the number of connectable addresses in the tried table.
+            #
+            # Method:
+            # * Choose a random address from new and attempt to connect to it if we can connect
+            # successfully it is added to tried.
+            # * Start attempting feeler connections only after node finishes making outbound
+            # connections.
+            # * Only make a feeler connection once every few minutes.
+
+            is_feeler = False
+
+            if count_outbound >= target_outbound_connections:
+                if time.time() * 1000 * 1000 > next_feeler:
+                    next_feeler = poisson_next_send(time.time() * 1000 * 1000, 120)                    
+                    is_feeler = True
+                else:
+                    continue
+            
+            address_manager = global_connections.peers.address_manager
+            await address_manager.resolve_tried_collisions()
+            tries = 0
+            now = time.time()
+            addr = None
+            while True:
+                addr = address_manager.select_tried_collision()
+                if (
+                    not is_feeler
+                    or addr is None
+                ):
+                    addr = await address_manager.select_peer(is_feeler)
+                if addr is None:
+                    break
+                # Require outbound connections, other than feelers, to be to distinct network groups.
+                if (
+                    not is_feeler
+                    and addr.get_group() in groups
+                ):
+                    break
+                tries += 1
+                if tries > 100:
+                    break
+                # only consider very recently tried nodes after 30 failed attempts
+                if (
+                    now - addr.nLastTry < 600
+                    and tries < 30
+                ):
+                    continue
+
+            disconnect_after_handshake = is_feeler
+            if count_outbound >= target_outbound_connections:
+                disconnect_after_handshake = True
+            if addr is not None:
+                asyncio.create_task(self.server.start_client(addr, None, None, disconnect_after_handshake))
+            await asnycio.sleep(5)
+
+    return asyncio.create_task(connect_to_peers())
 
 
 class Service:

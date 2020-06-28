@@ -132,7 +132,7 @@ async def initialize_pipeline(
 
 
 async def stream_reader_writer_to_connection(
-    swrt: Tuple[asyncio.StreamReader, asyncio.StreamWriter, OnConnectFunc],
+    swrt: Tuple[asyncio.StreamReader, asyncio.StreamWriter, OnConnectFunc, bool, bool],
     server_port: int,
     local_type: NodeType,
     log: logging.Logger,
@@ -141,8 +141,8 @@ async def stream_reader_writer_to_connection(
     Maps a tuple of (StreamReader, StreamWriter, on_connect) to a Connection object,
     which also stores the type of connection (str). It is also added to the global list.
     """
-    sr, sw, on_connect = swrt
-    con = Connection(local_type, None, sr, sw, server_port, on_connect, log)
+    sr, sw, on_connect, is_outbound, is_feeler = swrt
+    con = Connection(local_type, None, sr, sw, server_port, on_connect, log, is_outbound, is_feeler)
 
     con.log.info(f"Connection with {con.get_peername()} established")
     return con
@@ -230,6 +230,11 @@ async def perform_handshake(
         # Remove the conenction from global connections
         global_connections.close(connection)
 
+    if connection.connection_type == NodeType.FULL_NODE:
+        if connection.is_feeler:
+            connection.close()
+            global_connections.close(connection)
+        await global_connections.mark_good(connection.get_peer_info())
 
 async def connection_to_message(
     pair: Tuple[Connection, PeerConnections],

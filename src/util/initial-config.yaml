@@ -127,8 +127,10 @@ full_node:
 
   # How often to connect to introducer if we need to learn more peers
   introducer_connect_interval: 500
-  # Continue trying to connect to more peers until this number of connections
-  target_peer_count: 10
+  # Accept peers until this number of connections
+  target_peer_count: 20
+  # Initiate outbound connections until this number is hit.
+  target_outbound_peer_count: 8
   # Only connect to peers who we have heard about in the last recent_peer_threshold seconds
   recent_peer_threshold: 6000
 

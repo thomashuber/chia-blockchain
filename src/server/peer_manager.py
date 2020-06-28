@@ -433,7 +433,7 @@ class AddressManager:
         old_id = self.tried_matrix[tried_bucket][tried_bucket_pos]
         return self.map_info[old_id]
 
-    def get_addr_(self):
+    def get_peers_(self):
         addr = []
         num_nodes = 23 * len(self.random_pos) / 100
         if num_nodes > 2500:
@@ -515,9 +515,9 @@ class AddressManager:
             return self.sleect_peer_(new_only)
 
     # Return a bunch of addresses, selected at random.
-    async def get_addr(self):
+    async def get_peers(self):
         async with self.lock:
-            return self.get_addr()
+            return self.get_peers_()
 
     async def mark_connected(self, addr):
         async with self.lock:
