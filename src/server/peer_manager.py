@@ -483,11 +483,17 @@ class AddressManager:
         update_interval = 20 * 60
         if self.nTime - info.nTime > update_interval:
             info.nTime = self.nTime
+    
+    async def size():
+        async with self.lock:
+            return len(self.random_pos)
 
-    async def add_to_new_table(self, addresses, source, penalty=0):
+    async def add_to_new_table(self, addresses, source=None, penalty=0):
+        is_added = False
         async with self.lock:
             for addr in addresses:
-                self.add_to_new_table_(addr, source, penalty)
+                is_added = is_added or self.add_to_new_table_(addr, source, penalty)
+        return is_added
 
     # Mark an entry as accesible.
     async def mark_good(self, addr, test_before_evict, nTime=time.time()):
@@ -510,9 +516,9 @@ class AddressManager:
             return self.select_tried_collision_()
 
     # Choose an address to connect to.
-    async def select_peer(self, new_only):
+    async def select_peer(self, new_only=False):
         async with self.lock:
-            return self.sleect_peer_(new_only)
+            return self.select_peer_(new_only)
 
     # Return a bunch of addresses, selected at random.
     async def get_peers(self):

@@ -45,3 +45,6 @@ class PeerInfo(Streamable):
             ipv4 = 0
         group = bytes([ipv4]) + ip.packed[:2]
         return group
+    
+    def __eq__(self, other):
+        return (self.host == other.host and self.port == other.port)
