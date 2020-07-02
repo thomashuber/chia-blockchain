@@ -14,7 +14,9 @@ NEW_BUCKET_COUNT = 1024
 BUCKET_SIZE = 64
 TRIED_COLLISION_SIZE = 10
 NEW_BUCKETS_PER_ADDRESS = 8
-
+LOG_TRIED_BUCKET_COUNT = 3
+LOG_NEW_BUCKET_COUNT = 10
+LOG_BUCKET_SIZE = 6
 
 # This is a Python port from 'CAddrInfo' class from Bitcoin core code.
 class ExtendedPeerInfo:
@@ -33,6 +35,8 @@ class ExtendedPeerInfo:
         self.nLastSuccess = 0
         self.nLastTry = 0
         self.nTime = 0
+        self.nAttempts = 0
+        self.last_update_time = 0
         self.nLastCountAttempt = 0
 
     def get_tried_bucket(self, nKey):
@@ -94,16 +98,13 @@ class ExtendedPeerInfo:
         )
         return hash1 % BUCKET_SIZE
 
-    def is_terrible(self, nNow):
-        if (
-            self.nLastTry is not None
-            and self.nLastTry >= nNow - 60
-        ):
-            return False
+    def is_terrible(self, nNow=time.time()):
+        # TODO: Implement this.
+        return False
 
-    def get_selection_chance(self, nNow):
+    def get_selection_chance(self, nNow=time.time()):
         fChance = 1.0
-        nSinceLastTry = max(self.nNow - self.nLastTry, 0)
+        nSinceLastTry = max(nNow - self.nLastTry, 0)
         # deprioritize very recent attempts away
         if nSinceLastTry < 60 * 10:
             fChance *= 0.01
@@ -125,15 +126,15 @@ class AddressManager:
         self.random_pos = []
         self.tried_matrix = [
             [
-                -1 for x in range(TRIED_BUCKET_COUNT)
+                -1 for x in range(BUCKET_SIZE)
             ]
-            for y in range(BUCKET_SIZE)
+            for y in range(TRIED_BUCKET_COUNT)
         ]
         self.new_matrix = [
             [
-                -1 for x in range(NEW_BUCKET_COUNT)
+                -1 for x in range(BUCKET_SIZE)
             ]
-            for y in range(BUCKET_SIZE)
+            for y in range(NEW_BUCKET_COUNT)
         ]
         self.tried_count = 0
         self.new_count = 0
@@ -147,15 +148,15 @@ class AddressManager:
         self.id_count += 1
         node_id = self.id_count
         self.map_info[node_id] = ExtendedPeerInfo(addr, addr_src)
-        self.map_addr[addr] = node_id
+        self.map_addr[addr.host] = node_id
         self.map_info[node_id].random_pos = len(self.random_pos)
         self.random_pos.append(node_id)
         return (self.map_info[node_id], node_id)
 
     def find_(self, addr: PeerInfo):
-        if addr not in self.map_addr:
+        if addr.host not in self.map_addr:
             return (None, None)
-        node_id = self.map_addr[addr]
+        node_id = self.map_addr[addr.host]
         if node_id not in self.map_info:
             return (None, node_id)
         return (self.map_info[node_id], node_id)
@@ -174,11 +175,11 @@ class AddressManager:
     def make_tried_(self, info, node_id):
         for bucket in range(NEW_BUCKET_COUNT):
             pos = info.get_bucket_position(self.nKey, True, bucket)
-            if self.tried_matrix[bucket][pos] == node_id:
-                self.tried_matrix[bucket][pos] -= 1
+            if self.new_matrix[bucket][pos] == node_id:
+                self.new_matrix[bucket][pos] = -1
                 info.ref_count -= 1
-        assert(info.ref_count == 0)
-        self.count_new -= 1
+        assert info.ref_count == 0
+        self.new_count -= 1
         cur_bucket = info.get_tried_bucket(self.nKey)
         cur_bucket_pos = info.get_bucket_position(self.nKey, False, cur_bucket)
         if self.tried_matrix[cur_bucket][cur_bucket_pos] != -1:
@@ -211,7 +212,7 @@ class AddressManager:
                 self.delete_new_entry_(delete_id)
 
     def mark_good_(self, addr, test_before_evict, nTime):
-        self.nLastGood = self.nTime
+        self.nLastGood = nTime
         (info, node_id) = self.find_(addr)
         if info is None:
             return
@@ -223,8 +224,8 @@ class AddressManager:
             return
 
         # update info
-        info.nLastSuccess = self.nTime
-        info.nLastTry = self.nTime
+        info.nLastSuccess = nTime
+        info.nLastTry = nTime
         info.nAttempts = 0
         # nTime is not updated here, to avoid leaking information about
         # currently-connected peers.
@@ -250,7 +251,7 @@ class AddressManager:
         # NOTE(Florin): Double check this. It's not used anywhere else.
 
         # which tried bucket to move the entry to
-        tried_bucket = info.GetTriedBucket(self.nKey)
+        tried_bucket = info.get_tried_bucket(self.nKey)
         tried_bucket_pos = info.get_bucket_position(self.nKey, False, tried_bucket)
 
         # Will moving this address into tried evict another entry?
@@ -265,12 +266,12 @@ class AddressManager:
         info = self.map_info[node_id]
         self.swap_random_(info.random_pos, len(self.random_pos) - 1)
         self.random_pos = self.random_pos[:-1]
-        self.map_addr.erase(info)
-        self.map_info.erase(node_id)
+        del self.map_addr[info.peer_info.host]
+        del self.map_info[node_id]
         self.new_count -= 1
 
     def add_to_new_table_(self, addr, source, nTimePenalty):
-        fNew = False
+        is_unique = False
         (info, node_id) = self.find_(addr)
         if (
             info is not None
@@ -280,29 +281,10 @@ class AddressManager:
             nTimePenalty = 0
 
         if info is not None:
-            # periodically update nTime
-            currently_online = time.time() - addr.nTime < 24 * 60 * 60
+            # TODO: handle this exactly like Bitcoin does.
+            currently_online = (time.time() - info.nTime < 24 * 60 * 60)
             update_interval = 60 * 60 if currently_online else 24 * 60 * 60
-            if (
-                addr.nTime is not None
-                and (
-                    info.nTime is None
-                    or info.nTime < addr.nTime - update_interval - nTimePenalty
-                )
-            ):
-                info.nTime = max(0, addr.nTime - nTimePenalty)
-
-            # add services
-            # pinfo->nServices = ServiceFlags(pinfo->nServices | addr.nServices);
-
-            # do not update if no new information is present
-            if (
-                addr.nTime is None
-                or (
-                    info.nTime is not None
-                    and addr.nTime <= info.nTime
-                )
-            ):
+            if time.time() - info.last_update_time < update_interval:
                 return False
 
             # do not update if the entry was already in the "tried" table
@@ -324,7 +306,7 @@ class AddressManager:
             (info, node_id) = self.create_(addr, source)
             info.nTime = max(0, info.nTime - nTimePenalty)
             self.new_count += 1
-            self.fNew = True
+            is_unique = True
 
         nUBucket = info.get_new_bucket(self.nKey, source)
         nUBucketPos = info.get_bucket_position(self.nKey, True, nUBucket)
@@ -332,9 +314,9 @@ class AddressManager:
             fInsert = (self.new_matrix[nUBucket][nUBucketPos] == -1)
             if not fInsert:
                 info_existing = self.map_info[
-                    self.new_maxtrix[nUBucket][nUBucketPos]
+                    self.new_matrix[nUBucket][nUBucketPos]
                 ]
-                if (info_existing.IsTerrible() or (info_existing.ref_count > 1 and info.ref_count == 0)):
+                if (info_existing.is_terrible() or (info_existing.ref_count > 1 and info.ref_count == 0)):
                     fInsert = True
             if fInsert:
                 self.clear_new_(nUBucket, nUBucketPos)
@@ -343,7 +325,8 @@ class AddressManager:
             else:
                 if info.ref_count == 0:
                     self.delete_new_entry_(node_id)
-        return fNew
+        info.last_update_time = time.time()
+        return is_unique
 
     def attempt_(self, addr, count_failures, nTime):
         info, _ = self.find_(addr)
@@ -365,7 +348,7 @@ class AddressManager:
         if len(self.random_pos) == 0:
             return None
 
-        if (new_only and self.count_new == 0):
+        if (new_only and self.new_count == 0):
             return None
 
         # Use a 50% chance for choosing between tried and new table entries.
@@ -382,25 +365,25 @@ class AddressManager:
                 nKBucket = randrange(TRIED_BUCKET_COUNT)
                 nKBucketPos = randrange(BUCKET_SIZE)
                 while self.tried_matrix[nKBucket][nKBucketPos] == -1:
-                    nKBucket = (nKBucket + randbits(math.log2(TRIED_BUCKET_COUNT))) % TRIED_BUCKET_COUNT
-                    nKBucketPos = (nKBucketPos + randbits(math.log2(BUCKET_SIZE))) % BUCKET_SIZE
+                    nKBucket = (nKBucket + randbits(LOG_TRIED_BUCKET_COUNT)) % TRIED_BUCKET_COUNT
+                    nKBucketPos = (nKBucketPos + randbits(LOG_BUCKET_SIZE)) % BUCKET_SIZE
                 node_id = self.tried_matrix[nKBucket][nKBucketPos]
-                (info, _) = self.map_info[node_id]
-                if randbits(30) < (fChanceFactor * info.GetChance() * (1 << 30)):
-                    return info
+                info = self.map_info[node_id]
+                if randbits(30) < (fChanceFactor * info.get_selection_chance() * (1 << 30)):
+                    return info.peer_info
                 fChanceFactor *= 1.2
         else:
             fChanceFactor = 1.0
             while True:
                 nUBucket = randrange(NEW_BUCKET_COUNT)
                 nUBucketPos = randrange(BUCKET_SIZE)
-                while self.new_table[nUBucket][nUBucketPos] == -1:
-                    nUBucket = (nUBucket + randbits(math.log2(NEW_BUCKET_COUNT))) % NEW_BUCKET_COUNT
-                    nUBucketPos = (nUBucketPos + randbits(math.log2(BUCKET_SIZE))) % BUCKET_SIZE
-                node_id = self.new_table[nUBucket][nUBucketPos]
+                while self.new_matrix[nUBucket][nUBucketPos] == -1:
+                    nUBucket = (nUBucket + randbits(LOG_NEW_BUCKET_COUNT)) % NEW_BUCKET_COUNT
+                    nUBucketPos = (nUBucketPos + randbits(LOG_BUCKET_SIZE)) % BUCKET_SIZE
+                node_id = self.new_matrix[nUBucket][nUBucketPos]
                 info = self.map_info[node_id]
-                if (randbits(30) < fChanceFactor * info.GetChance() * (1 << 30)):
-                    return info
+                if (randbits(30) < fChanceFactor * info.get_selection_chance() * (1 << 30)):
+                    return info.peer_info
                 fChanceFactor *= 1.2
 
     def resolve_tried_collisions_(self):
@@ -416,7 +399,7 @@ class AddressManager:
                     resolved = True
                 elif self.tried_matrix[tried_bucket][tried_bucket_pos] != -1:
                     old_id = self.tried_matrix[tried_bucket][tried_bucket_pos]
-                    old_info = self.map_addr[old_id]
+                    old_info = self.map_info[old_id]
                     if time.time() - old_info.nLastSuccess < 4 * 60 * 60:
                         resolved = True
                     elif time.time() - old_info.nLastTry < 4 * 60 * 60:
@@ -451,9 +434,8 @@ class AddressManager:
         num_nodes = 23 * len(self.random_pos) // 100
         if num_nodes > 2500:
             num_nodes = 2500
-
         for n in range(len(self.random_pos)):
-            if len(addr) > num_nodes:
+            if len(addr) >= num_nodes:
                 return addr
 
             nRndPos = randrange(len(self.random_pos) - n) + n
@@ -509,7 +491,7 @@ class AddressManager:
         return is_added
 
     # Mark an entry as accesible.
-    async def mark_good(self, addr, test_before_evict, nTime=time.time()):
+    async def mark_good(self, addr, test_before_evict=True, nTime=time.time()):
         async with self.lock:
             self.mark_good_(addr, test_before_evict, nTime)
 

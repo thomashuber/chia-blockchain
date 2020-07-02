@@ -37,7 +37,7 @@ class TestPeerManager:
         assert await addrman.add_to_new_table([peer1])
         assert await addrman.size() == 1
         peer1_ret = await addrman.select_peer()
-        assert peer == peer1
+        assert peer1_ret == peer1
 
         # Test: Does IP address deduplication work correctly.
         peer1_duplicate = PeerInfo("250.1.1.1", 8444)
@@ -57,7 +57,7 @@ class TestPeerManager:
         # Test: AddrMan::Add multiple addresses works as expected
         addrman2 = AddressManagerTest()
         peers = [peer1, peer2]
-        assert await addrman2.add_to_new_table([peers])
+        assert await addrman2.add_to_new_table(peers)
         assert await addrman2.size() >= 1
 
     @pytest.mark.asyncio
@@ -75,7 +75,7 @@ class TestPeerManager:
         assert not await addrman.add_to_new_table([peer2], source)
         assert await addrman.size() == 1
         peer3 = await addrman.select_peer()
-        await peer3 == peer1
+        assert peer3 == peer1
 
         # Test: Add same IP but diff port to tried table, it doesn't get added.
         # Perhaps this is not ideal behavior but it is the current behavior.
@@ -133,9 +133,9 @@ class TestPeerManager:
         # Test: Select pulls from new and tried regardless of port number.
         ports = []
         for _ in range(20):
-            port = await addrman.select_peer().port
-            if port not in ports:
-                ports.append(port)
+            peer = await addrman.select_peer()
+            if peer.port not in ports:
+                ports.append(peer.port)
         assert len(ports) == 3
 
     @pytest.mark.asyncio
@@ -202,7 +202,7 @@ class TestPeerManager:
             info1[0] is not None
             and info1[1] is not None
         )
-        assert info1[0] == peer1
+        assert info1[0].peer_info == peer1
 
         # Test: Find does not discriminate by port number.
         info2 = addrman.find_(peer2)
@@ -213,12 +213,12 @@ class TestPeerManager:
         assert info2 == info1
 
         # Test: Find returns another IP matching what we searched on.
-        info3 = addrman.find_(addr3)
+        info3 = addrman.find_(peer3)
         assert (
             info3[0] is not None
             and info3[1] is not None
         )
-        assert info3[0] == peer3
+        assert info3[0].peer_info == peer3
 
     @pytest.mark.asyncio
     async def test_addrman_create(self):
@@ -258,13 +258,8 @@ class TestPeerManager:
         peer3 = PeerInfo("251.252.2.3", 8444)
         peer4 = PeerInfo("251.252.2.4", 8444)
         peer5 = PeerInfo("251.252.2.5", 8444)
-        peer1.nTime = time.time()
-        peer2.nTime = time.time()
-        peer3.nTime = time.time()
-        peer4.nTime = time.time()
-        peer5.nTime = time.time()
         source1 = PeerInfo("250.1.2.1", 8444)
-        source1 = PeerInfo("250.2.3.3", 8444)
+        source2 = PeerInfo("250.2.3.3", 8444)
 
         # Test: Ensure GetPeers works with new addresses.
         assert await addrman.add_to_new_table([peer1], source1)
@@ -272,23 +267,21 @@ class TestPeerManager:
         assert await addrman.add_to_new_table([peer3], source1)
         assert await addrman.add_to_new_table([peer4], source1)
         assert await addrman.add_to_new_table([peer5], source1)
-
         # GetPeers returns 23% of addresses, 23% of 5 is 1 rounded down.
         peers2 = await addrman.get_peers()
         assert len(peers2) == 1
     
         # Test: Ensure GetPeers works with new and tried addresses.
-        await addrman.mark_good(addr1)
-        await addrman.mark_good(addr2)
+        await addrman.mark_good(peer1)
+        await addrman.mark_good(peer2)
         peers3 = await addrman.get_peers()
         assert len(peers3) == 1
 
         # Test: Ensure GetPeers still returns 23% when addrman has many addrs.
         for i in range(1, 8 * 256):
             octet1 = i % 256
-            octet2 = (i >> 8) % 256
+            octet2 = i >> 8 % 256
             peer = PeerInfo(str(octet1) + "." + str(octet2) + ".1.23", 8444)
-            peer.nTime = time.time()
             await addrman.add_to_new_table([peer])
             if i % 8 == 0:
                 await addrman.mark_good(peer)
