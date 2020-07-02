@@ -25,29 +25,34 @@ class ExtendedPeerInfo:
     ):
         self.peer_info = peer_info
         self.src = src_peer
-        self.last_try = None
+        if src_peer is None:
+            self.src = peer_info
         self.random_pos = None
         self.is_tried = False
         self.ref_count = 0
         self.nLastSuccess = 0
         self.nLastTry = 0
+        self.nTime = 0
         self.nLastCountAttempt = 0
 
     def get_tried_bucket(self, nKey):
         hash1 = int.from_bytes(
             bytes(
-                std_hash(nKey + self.peer_info.get_key())[:8]
-            )
+                std_hash(
+                    nKey.to_bytes(32, byteorder='big') 
+                    + self.peer_info.get_key()
+                )[:8]
+            ), byteorder='big'
         )
         hash1 = hash1 % TRIED_BUCKETS_PER_GROUP
         hash2 = int.from_bytes(
             bytes(
                 std_hash(
-                    nKey
+                    nKey.to_bytes(32, byteorder='big')
                     + self.peer_info.get_group()
                     + bytes([hash1])
                 )[:8]
-            )
+            ), byteorder='big'
         )
         return hash2 % TRIED_BUCKET_COUNT
 
@@ -57,21 +62,21 @@ class ExtendedPeerInfo:
         hash1 = int.from_bytes(
             bytes(
                 std_hash(
-                    nKey
+                    nKey.to_bytes(32, byteorder='big')
                     + self.peer_info.get_group()
                     + src_peer.get_group()
                 )[:8]
-            )
+            ), byteorder='big'
         )
         hash1 = hash1 % NEW_BUCKETS_PER_SOURCE_GROUP
         hash2 = int.from_bytes(
             bytes(
                 std_hash(
-                    nKey
+                    nKey.to_bytes(32, byteorder='big')
                     + src_peer.get_group()
                     + bytes([hash1])
                 )[:8]
-            )
+            ), byteorder='big'
         )
         return hash2 % NEW_BUCKET_COUNT
 
@@ -79,23 +84,26 @@ class ExtendedPeerInfo:
         ch = 'N' if fNew else 'K'
         hash1 = int.from_bytes(
             bytes(
-                nKey
-                + bytes([ch, nBucket])
-                + self.peer_info.get_key()
-            )[:8]
+                std_hash(
+                    nKey.to_bytes(32, byteorder='big')
+                    + ch.encode()
+                    + nBucket.to_bytes(3, byteorder='big')
+                    + self.peer_info.get_key()
+                )[:8]
+            ), byteorder='big'
         )
         return hash1 % BUCKET_SIZE
 
     def is_terrible(self, nNow):
         if (
-            self.last_try is not None
-            and self.last_try >= nNow - 60
+            self.nLastTry is not None
+            and self.nLastTry >= nNow - 60
         ):
             return False
 
     def get_selection_chance(self, nNow):
         fChance = 1.0
-        nSinceLastTry = max(self.nNow - self.last_try, 0)
+        nSinceLastTry = max(self.nNow - self.nLastTry, 0)
         # deprioritize very recent attempts away
         if nSinceLastTry < 60 * 10:
             fChance *= 0.01
@@ -129,7 +137,10 @@ class AddressManager:
         ]
         self.tried_count = 0
         self.new_count = 0
+        self.map_addr = {}
+        self.map_info = {}
         self.nLastGood = 1
+        self.tried_collisions = []
         self.lock = asyncio.Lock()
 
     def create_(self, addr: PeerInfo, addr_src: PeerInfo):
@@ -245,7 +256,8 @@ class AddressManager:
         # Will moving this address into tried evict another entry?
         if (test_before_evict and self.tried_matrix[tried_bucket][tried_bucket_pos] != -1):
             if len(self.tried_collisions) < TRIED_COLLISION_SIZE:
-                self.tried_collisions.insert(node_id)
+                if node_id not in self.tried_collisions:
+                    self.tried_collisions.append(node_id)
         else:
             self.make_tried_(info, node_id)
 
@@ -261,7 +273,8 @@ class AddressManager:
         fNew = False
         (info, node_id) = self.find_(addr)
         if (
-            info.peer_info.host == addr.host
+            info is not None
+            and info.peer_info.host == addr.host
             and info.peer_info.port == addr.port
         ):
             nTimePenalty = 0
@@ -297,11 +310,11 @@ class AddressManager:
                 return False
 
             # do not update if the max reference count is reached
-            if info.nRefCount == NEW_BUCKETS_PER_ADDRESS:
+            if info.ref_count == NEW_BUCKETS_PER_ADDRESS:
                 return False
 
-            # stochastic test: previous nRefCount == N: 2^N times harder to increase it
-            factor = (1 << info.nRefCount)
+            # stochastic test: previous ref_count == N: 2^N times harder to increase it
+            factor = (1 << info.ref_count)
             if (
                 factor > 1
                 and randrange(factor) != 0
@@ -310,7 +323,7 @@ class AddressManager:
         else:
             (info, node_id) = self.create_(addr, source)
             info.nTime = max(0, info.nTime - nTimePenalty)
-            self.nNew += 1
+            self.new_count += 1
             self.fNew = True
 
         nUBucket = info.get_new_bucket(self.nKey, source)
@@ -321,14 +334,14 @@ class AddressManager:
                 info_existing = self.map_info[
                     self.new_maxtrix[nUBucket][nUBucketPos]
                 ]
-                if (info_existing.IsTerrible() or (info_existing.nRefCount > 1 and info.nRefCount == 0)):
+                if (info_existing.IsTerrible() or (info_existing.ref_count > 1 and info.ref_count == 0)):
                     fInsert = True
             if fInsert:
-                self.clear_new(nUBucket, nUBucketPos)
-                info.nRefCount += 1
+                self.clear_new_(nUBucket, nUBucketPos)
+                info.ref_count += 1
                 self.new_matrix[nUBucket][nUBucketPos] = node_id
             else:
-                if info.nRefCount == 0:
+                if info.ref_count == 0:
                     self.delete_new_entry_(node_id)
         return fNew
 
@@ -435,7 +448,7 @@ class AddressManager:
 
     def get_peers_(self):
         addr = []
-        num_nodes = 23 * len(self.random_pos) / 100
+        num_nodes = 23 * len(self.random_pos) // 100
         if num_nodes > 2500:
             num_nodes = 2500
 
@@ -484,7 +497,7 @@ class AddressManager:
         if self.nTime - info.nTime > update_interval:
             info.nTime = self.nTime
     
-    async def size():
+    async def size(self):
         async with self.lock:
             return len(self.random_pos)
 

@@ -25,7 +25,7 @@ class PeerInfo(Streamable):
         key = ip.packed
         key += bytes(
             [
-                self.port / 0x100,
+                self.port // 0x100,
                 self.port & 0x0FF,
             ]
         )
