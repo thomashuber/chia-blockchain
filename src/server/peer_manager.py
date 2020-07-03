@@ -17,6 +17,10 @@ NEW_BUCKETS_PER_ADDRESS = 8
 LOG_TRIED_BUCKET_COUNT = 3
 LOG_NEW_BUCKET_COUNT = 10
 LOG_BUCKET_SIZE = 6
+HORIZON_DAYS = 30
+MAX_RETRIES = 3
+MIN_FAIL_DAYS = 7
+MAX_FAILURES = 10
 
 # This is a Python port from 'CAddrInfo' class from Bitcoin core code.
 class ExtendedPeerInfo:
@@ -99,7 +103,35 @@ class ExtendedPeerInfo:
         return hash1 % BUCKET_SIZE
 
     def is_terrible(self, nNow=time.time()):
-        # TODO: Implement this.
+        # never remove things tried in the last minute
+        if (self.nLastTry > 0 and self.nLastTry >= nNow - 60): 
+            return False
+
+        # came in a flying DeLorean
+        if self.nTime > nNow + 10 * 60:
+            return True
+
+        # not seen in recent history
+        if (
+            self.nTime == 0
+            or nNow - self.nTime > HORIZON_DAYS * 24 * 60 * 60
+        ):
+            return True
+
+        # tried N times and never a success
+        if (
+            self.nLastSuccess == 0
+            and self.nAttempts >= MAX_RETRIES
+        ):
+            return True
+
+        # N successive failures in the last week
+        if (
+            nNow - self.nLastSuccess > MIN_FAIL_DAYS * 24 * 60 * 60 
+            and self.nAttempts >= MAX_FAILURES
+        ):
+            return True
+
         return False
 
     def get_selection_chance(self, nNow=time.time()):
@@ -113,9 +145,6 @@ class ExtendedPeerInfo:
         # but at most 1/28th to avoid the search taking forever or overly penalizing outages.
         fChance *= pow(0.66, min(self.nAttempts, 8))
         return fChance
-
-    def is_valid(self):
-        raise RuntimeError("Not implemented.")
 
 
 # This is a Python port from 'CAddrMan' class from Bitcoin core code.
@@ -330,7 +359,7 @@ class AddressManager:
 
     def attempt_(self, addr, count_failures, nTime):
         info, _ = self.find_(addr)
-        if info is not None:
+        if info is None:
             return
 
         if not (
@@ -393,24 +422,23 @@ class AddressManager:
                 resolved = True
             else:
                 info = self.map_info[node_id]
+                peer = info.peer_info
                 tried_bucket = info.get_tried_bucket(self.nKey)
-                tried_bucket_pos = info.get_tried_bucket(self.nKey, False, tried_bucket)
-                if not info.is_valid():
-                    resolved = True
-                elif self.tried_matrix[tried_bucket][tried_bucket_pos] != -1:
+                tried_bucket_pos = info.get_bucket_position(self.nKey, False, tried_bucket)
+                if self.tried_matrix[tried_bucket][tried_bucket_pos] != -1:
                     old_id = self.tried_matrix[tried_bucket][tried_bucket_pos]
                     old_info = self.map_info[old_id]
                     if time.time() - old_info.nLastSuccess < 4 * 60 * 60:
                         resolved = True
                     elif time.time() - old_info.nLastTry < 4 * 60 * 60:
                         if time.time() - old_info.nLastTry > 60:
-                            self.mark_good_(info, False, time.time())
+                            self.mark_good_(peer, False, time.time())
                             resolved = True
                     elif time.time() - info.nLastSuccess > 40 * 60:
-                        self.mark_good_(info, False, time.time())
+                        self.mark_good_(peer, False, time.time())
                         resolved = True
                 else:
-                    self.mark_good_(info, False, time.time())
+                    self.mark_good_(peer, False, time.time())
                     resolved = True
             if resolved:
                 self.tried_collisions.remove(node_id)

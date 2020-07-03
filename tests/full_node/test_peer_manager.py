@@ -20,9 +20,13 @@ class AddressManagerTest(AddressManager):
         self.nKey = 2 ** 256 - 1
     
     async def simulate_connection_fail(self, peer):
-        async with self.lock:
-            await self.mark_good(peer, True, 1)
-            await self.attempt(peer, False, time.time()-61)
+        await self.mark_good(peer.peer_info, True, 1)
+        await self.attempt(peer.peer_info, False, time.time()-61)
+
+    def mark_peer_not_terrible(self, peer):
+        info, _ = self.find_(peer)
+        if info is not None:
+            info.nTime = time.time()
 
 class TestPeerManager:
     @pytest.mark.asyncio
@@ -269,6 +273,12 @@ class TestPeerManager:
         assert await addrman.add_to_new_table([peer3], source1)
         assert await addrman.add_to_new_table([peer4], source1)
         assert await addrman.add_to_new_table([peer5], source1)
+        addrman.mark_peer_not_terrible(peer1)
+        addrman.mark_peer_not_terrible(peer2)
+        addrman.mark_peer_not_terrible(peer3)
+        addrman.mark_peer_not_terrible(peer4)
+        addrman.mark_peer_not_terrible(peer5)
+        
         # GetPeers returns 23% of addresses, 23% of 5 is 1 rounded down.
         peers2 = await addrman.get_peers()
         assert len(peers2) == 1
@@ -285,6 +295,7 @@ class TestPeerManager:
             octet2 = i >> 8 % 256
             peer = PeerInfo(str(octet1) + "." + str(octet2) + ".1.23", 8444)
             await addrman.add_to_new_table([peer])
+            addrman.mark_peer_not_terrible(peer)
             if i % 8 == 0:
                 await addrman.mark_good(peer)
 
@@ -442,38 +453,37 @@ class TestPeerManager:
         assert await addrman.size() == 18
         collision = await addrman.select_tried_collision()
         assert collision.peer_info == PeerInfo("250.1.1.16", 8444)
-        """await addrman.resolve_tried_collisions()
+        await addrman.resolve_tried_collisions()
         collision = await addrman.select_tried_collision()
         assert collision is None
 
         # Lets create two collisions.
-        for i in range(24, 33):
-            peer = PeerInfo("250.1.1." + str(i))
+        for i in range(19, 37):
+            peer = PeerInfo("250.1.1." + str(i), 8444)
             assert await addrman.add_to_new_table([peer], source)
             await addrman.mark_good(peer)
             assert await addrman.size() == i
             assert await addrman.select_tried_collision() is None
 
         # Cause a collision.
-        peer33 = PeerInfo("250.1.1.33", 8444)
-        assert await addrman.add_to_new_table([peer33], source)
-        await addrman.mark_good(peer33)
-        assert await addrman.size() == 33
+        peer37 = PeerInfo("250.1.1.37", 8444)
+        assert await addrman.add_to_new_table([peer37], source)
+        await addrman.mark_good(peer37)
+        assert await addrman.size() == 37   
 
         # Cause a second collision.
-        assert await addrman.add_to_new_table([peer23], source)
-        await addrman.mark_good(peer23)
-        assert await addrman.size() == 33
+        assert not await addrman.add_to_new_table([peer18], source)
+        await addrman.mark_good(peer18)
+        assert await addrman.size() == 37
 
         collision = await addrman.select_tried_collision()
         assert collision is not None
         await addrman.resolve_tried_collisions()
         collision = await addrman.select_tried_collision()
         assert collision is None
-    """
     
     @pytest.mark.asyncio
-    async def test_addrman_eviction(self):
+    async def test_addrman_eviction_works(self):
         addrman = AddressManagerTest()
         assert await addrman.size() == 0
         # Empty addrman should return blank addrman info.
@@ -481,7 +491,7 @@ class TestPeerManager:
 
         # Add twenty two addresses.
         source = PeerInfo("252.2.2.2", 8444)
-        for i in range(1, 23):
+        for i in range(1, 18):
             peer = PeerInfo("250.1.1." + str(i), 8444)
             assert await addrman.add_to_new_table([peer], source)
             await addrman.mark_good(peer)
@@ -489,29 +499,28 @@ class TestPeerManager:
             assert await addrman.size() == i
             assert await addrman.select_tried_collision() is None
 
-        # Collision between 23 and 19.
-        peer23 = PeerInfo("250.1.1.23", 8444)
-        assert await addrman.add_to_new_table([peer23], source)
-        await addrman.mark_good(peer23)
-        assert await addrman.size() == 23
+        # Collision between 18 and 16.
+        peer18 = PeerInfo("250.1.1.18", 8444)
+        assert await addrman.add_to_new_table([peer18], source)
+        await addrman.mark_good(peer18)
+        assert await addrman.size() == 18
         collision = await addrman.select_tried_collision()
-        assert collision == PeerInfo("250.1.1.19", 8444)
+        assert collision.peer_info == PeerInfo("250.1.1.16", 8444)
         await addrman.simulate_connection_fail(collision)
-
-        # Should swap 23 for 19.
+        # Should swap 18 for 16.
         await addrman.resolve_tried_collisions()
         assert await addrman.select_tried_collision() is None
 
-        # If 23 was swapped for 19, then this should cause no collisions.
-        assert not await addrman.add_to_new_table([collision], source)
-        await addrman.mark_good()
+        # If 18 was swapped for 16, then this should cause no collisions.
+        assert not await addrman.add_to_new_table([peer18], source)
+        await addrman.mark_good(peer18)
         assert await addrman.select_tried_collision() is None
 
-        # If we insert 19 is should collide with 23.
-        addr19 = PeerInfo("250.1.1.19", 8444)
-        assert not await addrman.add_to_new_table([addr19], source)
-        await addrman.mark_good(addr19)
+        # If we insert 16 is should collide with 18.
+        addr16 = PeerInfo("250.1.1.16", 8444)
+        assert not await addrman.add_to_new_table([addr16], source)
+        await addrman.mark_good(addr16)
         collision = await addrman.select_tried_collision()
-        assert collision == PeerInfo("250.1.1.19", 8444)
+        assert collision.peer_info == PeerInfo("250.1.1.18", 8444)
         await addrman.resolve_tried_collisions()
-        assert addrman.select_tried_collision() is None
+        assert await addrman.select_tried_collision() is None
